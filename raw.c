@@ -56,7 +56,7 @@ const char* const SCHEDULER_MODES[] = {
 //
 static char g_device_name[MAX_DEVICE_NAME_SIZE];
 static uint32_t g_scheduler_mode = 0;
-static uint32_t g_record_bytes = 0;
+static uint32_t g_record_bytes = 1536;
 static uint32_t g_large_block_ops_bytes = 131072; //128K
 static FILE* g_output_file;
 static device* g_device;
@@ -64,17 +64,20 @@ static device* g_device;
 //==========================================================
 // Forward Declarations
 //
-static void	set_schedulers();
-static inline uint8_t* align_4096(uint8_t* stack_buffer);
-static inline uint8_t* cf_valloc(size_t size);
+static void	set_scheduler();
+static bool read_op(uint64_t p_off);
+static bool write_op(uint64_t p_off, char* message);
 static bool config_parse_device_name(char* device);
 static bool	configure(int argc, char* argv[]);
-static uint64_t discover_min_op_bytes(int fd, const char *name);
 static bool discover_num_blocks(device* p_device);
 static int fd_get(device* p_device);
-//static bool	discover_num_blocks(device* p_device);
+static uint64_t rand_48();
+static uint64_t discover_min_op_bytes(int fd, const char *name);
+static inline uint64_t random_read_offset(device* p_device);
+static inline uint8_t* cf_valloc(size_t size);
+static inline uint8_t* align_4096(uint8_t* stack_buffer);
 static uint64_t read_from_device(device* p_device, uint64_t offset,
-					uint32_t size, uint8_t* p_buffer);
+					uint32_t size, char* p_buffer);
 static uint64_t write_to_device(device* p_device, uint64_t offset,
 					uint32_t size, uint8_t* p_buffer);
 
@@ -88,14 +91,78 @@ int main(int argc, char* argv[]) {
 		exit(-1);
 	}
 
-	set_schedulers();
+	set_scheduler();
+	srand(time(NULL));
 
-	//read_from_device();
+	uint64_t offset = random_read_offset(g_device);
+	fprintf(g_output_file, "\n-> Random read Offset: %" PRIu64 "\n\n", offset);
 
-	fprintf(g_output_file,"\n => Output file closed.\n");
+	int i;
+	char* messages[] = {"DareDevil it's a great show!",
+						"Flash it's a great show!",
+						"Jessica Jones it's a great show!",
+						"Californication it's a great show!",
+						"Under the Dome it's a great show!"};
+	for (i=0; i<5; i++){
+		write_op(offset+(i*512), messages[i]);
+	}
+	fprintf(g_output_file, "\n");
+	for (i=0; i<5; i++){
+		read_op(offset+(4*512)-(i*512));
+	}
+
+	fprintf(g_output_file,"\n => Raw Device Access - output file closed.\n\n");
 	fclose(g_output_file);
 	free(g_device);
 	return 0;
+}
+
+//==========================================================
+// Read and Write functions
+//
+
+//------------------------------------------------
+// Read Operation.
+//
+static bool read_op(uint64_t p_off){
+	char* p_buffer = cf_valloc(g_device->read_bytes);
+
+	if (p_buffer) {
+		if (read_from_device(g_device, p_off, g_device->read_bytes, p_buffer)){
+			free(p_buffer);
+			return false;
+		}
+		fprintf(g_output_file, "- Reading: %s\nSize: %d\n", p_buffer, (int)strlen(p_buffer));
+	}
+	else {
+		fprintf(stdout, "ERROR: read buffer cf_valloc()\n");
+	}
+
+	free(p_buffer);
+	return true;
+}
+
+
+//------------------------------------------------
+// Write Operation.
+//
+static bool write_op(uint64_t p_off, char* message){
+	uint8_t* p_buffer = cf_valloc(g_device->read_bytes);
+
+	if (p_buffer) {
+		strcpy(p_buffer, message);
+		if (write_to_device(g_device, p_off, g_device->read_bytes, p_buffer)){
+			free(p_buffer);
+			return false;
+		}
+		fprintf(g_output_file, "- Writing: %s\nSize: %d\n", p_buffer, (int)strlen(p_buffer));
+	}
+	else {
+		fprintf(stdout, "ERROR: write buffer cf_valloc()\n");
+	}
+
+	free(p_buffer);
+	return true;
 }
 
 //==========================================================
@@ -129,8 +196,8 @@ static bool config_out_file(char *fileName){
 	}
 	else{
 		g_output_file = out;
+		fprintf(g_output_file, "\n=> Raw Device Access - output file created\n\n");
 		printf("-> Output file created. Access it when done.\n\n");
-		fprintf(g_output_file, "\n=> Raw Device Access - output file \n\n");
 	}
 	return true;
 }
@@ -161,6 +228,7 @@ static bool	configure(int argc, char* argv[]){
 		printf("=> ERROR: Couldn't discover number of blocks.\n");
 		return false;
 	}
+
 	return true;
 }
 
@@ -223,7 +291,7 @@ static bool discover_num_blocks(device* p_device) {
 // Do one device read operation.
 //
 static uint64_t read_from_device(device* p_device, uint64_t offset,
-		uint32_t size, uint8_t* p_buffer) {
+		uint32_t size, char* p_buffer) {
 	int fd = fd_get(p_device);
 
 	if (fd == -1) {
@@ -236,7 +304,7 @@ static uint64_t read_from_device(device* p_device, uint64_t offset,
 		fprintf(g_output_file, "ERROR: Couldn't seek & read\n");
 		return -1;
 	}
-
+	
 	//uint64_t stop_ns = cf_getns();
 	//fd_put(p_device, fd);
 	//return stop_ns;
@@ -270,7 +338,7 @@ static uint64_t write_to_device(device* p_device, uint64_t offset,
 //------------------------------------------------
 // Set devices' system block schedulers.
 //
-static void set_schedulers() {
+static void set_scheduler() {
 	const char* mode = SCHEDULER_MODES[g_scheduler_mode];
 	size_t mode_length = strlen(mode);
 	
@@ -328,6 +396,20 @@ static uint64_t discover_min_op_bytes(int fd, const char *name) {
 	free(buf);
 
 	return 0;
+}
+
+//------------------------------------------------
+// Get a random 48-bit uint64_t.
+//
+static uint64_t rand_48() {
+	return ((uint64_t)rand() << 16) | ((uint64_t)rand() & 0xffffULL);
+}
+
+//------------------------------------------------
+// Get a random read offset for a device.
+//
+static inline uint64_t random_read_offset(device* p_device) {
+	return (rand_48() % p_device->num_read_offsets) * p_device->min_op_bytes;
 }
 
 //------------------------------------------------
