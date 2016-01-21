@@ -1,5 +1,5 @@
 /*
-						S1Search Research 
+	S1Search Research 
 	Raw Device Access: Reading and Writing directly on a SSD
 */
 
@@ -17,6 +17,10 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#ifdef linux
+#include <linux/fs.h>
+#endif
+
 //==========================================================
 // Constants
 //
@@ -27,6 +31,9 @@
 #ifndef O_DIRECT
 #define O_DIRECT 040000 // the leading 0 is necessary - this is octal
 #endif
+
+const uint32_t LO_IO_MIN_SIZE = 512;
+const uint32_t HI_IO_MIN_SIZE = 4096;
 
 //==========================================================
 // Typedefs
@@ -49,6 +56,8 @@ const char* const SCHEDULER_MODES[] = {
 //
 static char g_device_name[MAX_DEVICE_NAME_SIZE];
 static uint32_t g_scheduler_mode = 0;
+static uint32_t g_record_bytes = 0;
+static uint32_t g_large_block_ops_bytes = 131072; //128K
 static FILE* g_output_file;
 static device* g_device;
 
@@ -60,6 +69,8 @@ static inline uint8_t* align_4096(uint8_t* stack_buffer);
 static inline uint8_t* cf_valloc(size_t size);
 static bool config_parse_device_name(char* device);
 static bool	configure(int argc, char* argv[]);
+static uint64_t discover_min_op_bytes(int fd, const char *name);
+static bool discover_num_blocks(device* p_device);
 static int fd_get(device* p_device);
 //static bool	discover_num_blocks(device* p_device);
 static uint64_t read_from_device(device* p_device, uint64_t offset,
@@ -71,7 +82,7 @@ static uint64_t write_to_device(device* p_device, uint64_t offset,
 // Main
 //
 int main(int argc, char* argv[]) {
-	fprintf(stdout, "\n=> Raw Device Access - direct IO test\n");
+	printf("\n=> Raw Device Access - direct IO test\n");
 
 	if (! configure(argc, argv)){
 		exit(-1);
@@ -79,9 +90,11 @@ int main(int argc, char* argv[]) {
 
 	set_schedulers();
 
+	//read_from_device();
 
-
+	fprintf(g_output_file,"\n => Output file closed.\n");
 	fclose(g_output_file);
+	free(g_device);
 	return 0;
 }
 
@@ -98,7 +111,7 @@ static bool config_parse_device_name(char *p_device_name){
 	}
 	
 	strcpy(g_device_name, p_device_name);
-	device *dev;
+	device* dev = malloc(sizeof(device));
 	dev->name = g_device_name;
 	g_device = dev;
 
@@ -116,8 +129,8 @@ static bool config_out_file(char *fileName){
 	}
 	else{
 		g_output_file = out;
-		printf("-> Output file created. Access it when done.\n");
-		fprintf(g_output_file, "\n=> Raw Device Access with C Language - output file \n\n");
+		printf("-> Output file created. Access it when done.\n\n");
+		fprintf(g_output_file, "\n=> Raw Device Access - output file \n\n");
 	}
 	return true;
 }
@@ -131,18 +144,23 @@ static bool	configure(int argc, char* argv[]){
 		return false;
 	}
 
-	if (! config_parse_device_name(argv[1])){
-		printf("=> ERROR: parsing device name.\n");
-		return false;
-	}
-
 	if (! config_out_file(argv[2])){
 		printf("=> ERROR: Couldn't create output file: %s\n", argv[1]);
 		return false;
 	}
 
+	if (! config_parse_device_name(argv[1])){
+		printf("=> ERROR: Couldn't parse device name.\n");
+		return false;
+	}
+
 	fprintf(g_output_file,"-> Configuration was a success!\n");
 	fprintf(g_output_file,"-> Device name: %s\n", g_device->name);
+
+	if (! discover_num_blocks(g_device)){
+		printf("=> ERROR: Couldn't discover number of blocks.\n");
+		return false;
+	}
 	return true;
 }
 
@@ -164,7 +182,7 @@ static int fd_get(device* p_device) {
 //------------------------------------------------
 // Discover device storage capacity.
 //
-/*static bool discover_num_blocks(device* p_device) {
+static bool discover_num_blocks(device* p_device) {
 	int fd = fd_get(p_device);
 
 	if (fd == -1) {
@@ -176,7 +194,7 @@ static int fd_get(device* p_device) {
 	ioctl(fd, BLKGETSIZE64, &device_bytes);
 	p_device->num_large_blocks = device_bytes / g_large_block_ops_bytes;
 	p_device->min_op_bytes = discover_min_op_bytes(fd, p_device->name);
-	fd_put(p_device, fd);
+	//fd_put(p_device, fd);
 
 	if (! (p_device->num_large_blocks && p_device->min_op_bytes)) {
 		return false;
@@ -192,13 +210,13 @@ static int fd_get(device* p_device) {
 	p_device->num_read_offsets = num_min_op_blocks - read_req_min_op_blocks + 1;
 	p_device->read_bytes = read_req_min_op_blocks * p_device->min_op_bytes;
 
-	fprintf(stdout, "%s size = %" PRIu64 " bytes, %" PRIu64 " large blocks, "
-		"%" PRIu64 " %" PRIu32 "-byte blocks, reads are %" PRIu32 " bytes\n",
+	fprintf(g_output_file, "-> Blocks Infomation:\n - %s size = %" PRIu64 " bytes\n - %" PRIu64 " large blocks\n - "
+		"%" PRIu64 " %" PRIu32 "-byte blocks\n - reads are %" PRIu32 " bytes\n",
 			p_device->name, device_bytes, p_device->num_large_blocks,
 			num_min_op_blocks, p_device->min_op_bytes, p_device->read_bytes);
 
 	return true;
-}*/
+}
 
 
 //------------------------------------------------
@@ -215,7 +233,7 @@ static uint64_t read_from_device(device* p_device, uint64_t offset,
 	if (lseek(fd, offset, SEEK_SET) != offset ||
 			read(fd, p_buffer, size) != (ssize_t)size) {
 		close(fd);
-		fprintf(stdout, "ERROR: seek & read\n");
+		fprintf(g_output_file, "ERROR: Couldn't seek & read\n");
 		return -1;
 	}
 
@@ -239,7 +257,7 @@ static uint64_t write_to_device(device* p_device, uint64_t offset,
 	if (lseek(fd, offset, SEEK_SET) != offset ||
 			write(fd, p_buffer, size) != (ssize_t)size) {
 		close(fd);
-		fprintf(stdout, "ERROR: seek & write\n");
+		fprintf(g_output_file, "ERROR: Couldn't seek & write\n");
 		return -1;
 	}
 
@@ -269,16 +287,47 @@ static void set_schedulers() {
 	FILE* scheduler_file = fopen(scheduler_file_name, "w");
 
 	if (! scheduler_file) {
-		fprintf(stdout, "ERROR: couldn't open %s\n", scheduler_file_name);
+		fprintf(g_output_file, "ERROR: couldn't open %s\n", scheduler_file_name);
 	}
 
 	else if (fwrite(mode, mode_length, 1, scheduler_file) != 1) {
-		fprintf(stdout, "ERROR: writing %s to %s\n", mode,
+		fprintf(g_output_file, "ERROR: writing %s to %s\n", mode,
 			scheduler_file_name);
 	}
 	else{
 		fclose(scheduler_file);
 	}
+}
+
+//------------------------------------------------
+// Discover device's minimum direct IO op size.
+//
+static uint64_t discover_min_op_bytes(int fd, const char *name) {
+	off_t off = lseek(fd, 0, SEEK_SET);
+
+	if (off != 0) {
+		fprintf(g_output_file, "ERROR: %s seek\n", name);
+		return 0;
+	}
+
+	uint8_t *buf = cf_valloc(HI_IO_MIN_SIZE);
+	size_t read_sz = LO_IO_MIN_SIZE;
+
+	while (read_sz <= HI_IO_MIN_SIZE) {
+		if (read(fd, (void*)buf, read_sz) == (ssize_t)read_sz) {
+			free(buf);
+			return read_sz;
+		}
+
+		read_sz <<= 1; // LO_IO_MIN_SIZE and HI_IO_MIN_SIZE are powers of 2
+	}
+
+	fprintf(g_output_file, "ERROR: %s read failed at all sizes from %u to %u bytes\n",
+			name, LO_IO_MIN_SIZE, HI_IO_MIN_SIZE);
+
+	free(buf);
+
+	return 0;
 }
 
 //------------------------------------------------
