@@ -21,6 +21,8 @@
 #include <linux/fs.h>
 #endif
 
+#include "clock.h"
+
 //==========================================================
 // Constants
 //
@@ -87,6 +89,8 @@ static uint64_t write_to_device(device* p_device, uint64_t offset,
 int main(int argc, char* argv[]) {
 	printf("\n=> Raw Device Access - direct IO test\n");
 
+	//printf("Time in nano seconds: %" PRIu64 "\n",cf_getns()); //teste
+
 	if (! configure(argc, argv)){
 		exit(-1);
 	}
@@ -94,15 +98,25 @@ int main(int argc, char* argv[]) {
 	set_scheduler();
 	srand(time(NULL));
 
-	uint64_t offset = random_read_offset(g_device);
-	fprintf(g_output_file, "\n-> Random read Offset: %" PRIu64 "\n\n", offset);
+	uint64_t offset = random_read_offset(g_device); //194589895168;
+	fprintf(g_output_file, "\n-> Offset: %" PRIu64 "\n\n", offset);
 
 	int i;
 	char* messages[] = {"DareDevil it's a great show!",
-						"Flash it's a great show!",
+						//"Flash it's a great show!",
 						"Jessica Jones it's a great show!",
-						"Californication it's a great show!",
-						"Under the Dome it's a great show!"};
+						//"Californication it's a great show!",
+						"Under the Dome it's a great show!",
+						//"X-Files it's a great show!",
+						//"Arrow it's a great show!",
+						"Mr. Robot it's a great show!",
+						//"Big Bang Theory it's a great show!",
+						"Dexter it's a great show!"};
+
+	for (i=0; i<5; i++){
+		read_op(offset+/*(4*512)-*/(i*512));
+	}
+	fprintf(g_output_file, "\n");
 	for (i=0; i<5; i++){
 		write_op(offset+(i*512), messages[i]);
 	}
@@ -141,7 +155,6 @@ static bool read_op(uint64_t p_off){
 	free(p_buffer);
 	return true;
 }
-
 
 //------------------------------------------------
 // Write Operation.
@@ -290,8 +303,7 @@ static bool discover_num_blocks(device* p_device) {
 //------------------------------------------------
 // Do one device read operation.
 //
-static uint64_t read_from_device(device* p_device, uint64_t offset,
-		uint32_t size, char* p_buffer) {
+static uint64_t read_from_device(device* p_device,uint64_t offset,uint32_t size, char* p_buffer) {
 	int fd = fd_get(p_device);
 
 	if (fd == -1) {
@@ -314,8 +326,7 @@ static uint64_t read_from_device(device* p_device, uint64_t offset,
 //------------------------------------------------
 // Do one device write operation.
 //
-static uint64_t write_to_device(device* p_device, uint64_t offset,
-		uint32_t size, uint8_t* p_buffer) {
+static uint64_t write_to_device(device* p_device, uint64_t offset, uint32_t size, uint8_t* p_buffer) {
 	int fd = fd_get(p_device);
 
 	if (fd == -1) {
@@ -355,11 +366,11 @@ static void set_scheduler() {
 	FILE* scheduler_file = fopen(scheduler_file_name, "w");
 
 	if (! scheduler_file) {
-		fprintf(g_output_file, "ERROR: couldn't open %s\n", scheduler_file_name);
+		fprintf(g_output_file, "=> ERROR: couldn't open %s\n", scheduler_file_name);
 	}
 
 	else if (fwrite(mode, mode_length, 1, scheduler_file) != 1) {
-		fprintf(g_output_file, "ERROR: writing %s to %s\n", mode,
+		fprintf(g_output_file, "=> ERROR: writing %s to %s\n", mode,
 			scheduler_file_name);
 	}
 	else{
@@ -422,9 +433,9 @@ static inline uint64_t safe_delta_ns(uint64_t start_ns, uint64_t stop_ns) {
 //------------------------------------------------
 // Align stack-allocated memory.
 //
-static inline uint8_t* align_4096(uint8_t* stack_buffer) {
+/*static inline uint8_t* align_4096(uint8_t* stack_buffer) {
 	return (uint8_t*)(((uint64_t)stack_buffer + 4095) & ~4095ULL);
-}
+}*/
 
 //------------------------------------------------
 // Aligned memory allocation.
