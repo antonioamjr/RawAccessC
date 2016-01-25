@@ -8,6 +8,7 @@
 //
 #include <inttypes.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -36,6 +37,7 @@
 
 const uint32_t LO_IO_MIN_SIZE = 512;
 const uint32_t HI_IO_MIN_SIZE = 4096;
+const uint32_t NUM_OF_READS = 50000;
 
 //==========================================================
 // Typedefs
@@ -57,7 +59,9 @@ const char* const SCHEDULER_MODES[] = {
 // Globals
 //
 static char g_device_name[MAX_DEVICE_NAME_SIZE];
-static uint32_t g_scheduler_mode = 0;
+static uint32_t g_scheduler_mode = 0; //noop mode
+static uint64_t g_read_reqs_per_sec = 0;
+static uint32_t g_write_reqs_per_sec = 0;
 static uint32_t g_record_bytes = 1536;
 static uint32_t g_large_block_ops_bytes = 131072; //128K
 static FILE* g_output_file;
@@ -74,6 +78,7 @@ static bool	configure(int argc, char* argv[]);
 static bool discover_num_blocks(device* p_device);
 static int fd_get(device* p_device);
 static uint64_t rand_48();
+static inline uint64_t safe_delta_ns(uint64_t start_ns, uint64_t stop_ns);
 static uint64_t discover_min_op_bytes(int fd, const char *name);
 static inline uint64_t random_read_offset(device* p_device);
 static inline uint8_t* cf_valloc(size_t size);
@@ -89,41 +94,33 @@ static uint64_t write_to_device(device* p_device, uint64_t offset,
 int main(int argc, char* argv[]) {
 	printf("\n=> Raw Device Access - direct IO test\n");
 
-	//printf("Time in nano seconds: %" PRIu64 "\n",cf_getns()); //teste
-
 	if (! configure(argc, argv)){
 		exit(-1);
 	}
 
 	set_scheduler();
 	srand(time(NULL));
+	
+	int i, counter = 0;
+	uint64_t begin_op_time, op_time = 0, offset;
 
-	uint64_t offset = random_read_offset(g_device); //194589895168;
-	fprintf(g_output_file, "\n-> Offset: %" PRIu64 "\n\n", offset);
+	uint64_t start_time = cf_getns();
+	for (i=0; i<NUM_OF_READS; i++){
+		offset = random_read_offset(g_device);
+		begin_op_time = cf_getns();
+		if(! read_op(offset)){
+			fprintf(g_output_file, "=> ERROR read op number: %d; Offset: %" PRIu64 "\n", i, offset);
+		}
+		op_time += safe_delta_ns(begin_op_time, cf_getns());
+		counter++;
+	}	
+	uint64_t stop_time = cf_getns();
 
-	int i;
-	char* messages[] = {"DareDevil it's a great show!",
-						//"Flash it's a great show!",
-						"Jessica Jones it's a great show!",
-						//"Californication it's a great show!",
-						"Under the Dome it's a great show!",
-						//"X-Files it's a great show!",
-						//"Arrow it's a great show!",
-						"Mr. Robot it's a great show!",
-						//"Big Bang Theory it's a great show!",
-						"Dexter it's a great show!"};
-
-	for (i=0; i<5; i++){
-		read_op(offset+/*(4*512)-*/(i*512));
-	}
-	fprintf(g_output_file, "\n");
-	for (i=0; i<5; i++){
-		write_op(offset+(i*512), messages[i]);
-	}
-	fprintf(g_output_file, "\n");
-	for (i=0; i<5; i++){
-		read_op(offset+(4*512)-(i*512));
-	}
+	fprintf(g_output_file,"-> Performance Information:\n");
+	fprintf(g_output_file," - Total Time: %" PRIu64 "\n", stop_time - start_time);
+	fprintf(g_output_file," - Counter: %d \n", counter);
+	fprintf(g_output_file," - Operations Time: %" PRIu64 "\n", op_time);
+	fprintf(g_output_file," - Ops per sec: %d\n", (int)((float)counter/((float)op_time/1000000000)));
 
 	fprintf(g_output_file,"\n => Raw Device Access - output file closed.\n\n");
 	fclose(g_output_file);
@@ -142,14 +139,14 @@ static bool read_op(uint64_t p_off){
 	char* p_buffer = cf_valloc(g_device->read_bytes);
 
 	if (p_buffer) {
-		if (read_from_device(g_device, p_off, g_device->read_bytes, p_buffer)){
+		if (read_from_device(g_device, p_off, g_device->read_bytes, p_buffer) == -1){
 			free(p_buffer);
 			return false;
 		}
-		fprintf(g_output_file, "- Reading: %s\nSize: %d\n", p_buffer, (int)strlen(p_buffer));
+		//fprintf(g_output_file, "- Reading: %s\nSize: %d\n", p_buffer, (int)strlen(p_buffer));
 	}
 	else {
-		fprintf(stdout, "ERROR: read buffer cf_valloc()\n");
+		fprintf(stdout, "=> ERROR: read buffer cf_valloc()\n");
 	}
 
 	free(p_buffer);
@@ -164,14 +161,14 @@ static bool write_op(uint64_t p_off, char* message){
 
 	if (p_buffer) {
 		strcpy(p_buffer, message);
-		if (write_to_device(g_device, p_off, g_device->read_bytes, p_buffer)){
+		if (write_to_device(g_device, p_off, g_device->read_bytes, p_buffer) == -1){
 			free(p_buffer);
 			return false;
 		}
-		fprintf(g_output_file, "- Writing: %s\nSize: %d\n", p_buffer, (int)strlen(p_buffer));
+		//fprintf(g_output_file, "- Writing: %s\nSize: %d\n", p_buffer, (int)strlen(p_buffer));
 	}
 	else {
-		fprintf(stdout, "ERROR: write buffer cf_valloc()\n");
+		fprintf(stdout, "=> ERROR: write buffer cf_valloc()\n");
 	}
 
 	free(p_buffer);
@@ -313,11 +310,11 @@ static uint64_t read_from_device(device* p_device,uint64_t offset,uint32_t size,
 	if (lseek(fd, offset, SEEK_SET) != offset ||
 			read(fd, p_buffer, size) != (ssize_t)size) {
 		close(fd);
-		fprintf(g_output_file, "ERROR: Couldn't seek & read\n");
+		fprintf(g_output_file, "=> ERROR: Couldn't seek & read\n");
 		return -1;
 	}
 	
-	//uint64_t stop_ns = cf_getns();
+	uint64_t stop_ns = cf_getns();
 	//fd_put(p_device, fd);
 	//return stop_ns;
 	return 0;
@@ -336,11 +333,11 @@ static uint64_t write_to_device(device* p_device, uint64_t offset, uint32_t size
 	if (lseek(fd, offset, SEEK_SET) != offset ||
 			write(fd, p_buffer, size) != (ssize_t)size) {
 		close(fd);
-		fprintf(g_output_file, "ERROR: Couldn't seek & write\n");
+		fprintf(g_output_file, "=> ERROR: Couldn't seek & write\n");
 		return -1;
 	}
 
-	//uint64_t stop_ns = cf_getns();
+	uint64_t stop_ns = cf_getns();
 	//fd_put(p_device, fd);
 	//return stop_ns;
 	return 0;
@@ -385,7 +382,7 @@ static uint64_t discover_min_op_bytes(int fd, const char *name) {
 	off_t off = lseek(fd, 0, SEEK_SET);
 
 	if (off != 0) {
-		fprintf(g_output_file, "ERROR: %s seek\n", name);
+		fprintf(g_output_file, "=> ERROR: %s seek\n", name);
 		return 0;
 	}
 
@@ -401,7 +398,7 @@ static uint64_t discover_min_op_bytes(int fd, const char *name) {
 		read_sz <<= 1; // LO_IO_MIN_SIZE and HI_IO_MIN_SIZE are powers of 2
 	}
 
-	fprintf(g_output_file, "ERROR: %s read failed at all sizes from %u to %u bytes\n",
+	fprintf(g_output_file, "=> ERROR: %s read failed at all sizes from %u to %u bytes\n",
 			name, LO_IO_MIN_SIZE, HI_IO_MIN_SIZE);
 
 	free(buf);
