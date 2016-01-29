@@ -37,9 +37,7 @@
 
 const uint32_t LO_IO_MIN_SIZE = 512;
 const uint32_t HI_IO_MIN_SIZE = 4096;
-const uint32_t NUM_OF_THREADS = 4;
-//const uint32_t NUM_OF_READS = 128000;
-//const uint32_t NUM_OF_WRITES = 64000;
+const uint32_t NUM_OF_INIT_THREADS = 12;
 
 //==========================================================
 // Typedefs
@@ -60,13 +58,18 @@ const char* const SCHEDULER_MODES[] = {
 //==========================================================
 // Globals
 //
+
 volatile int g_running_threads = 0;
 static int g_fd_device = -1;
+static long g_read_threads = 0;
+static long g_write_threads = 0;
+static long g_reads_counter = 0;
+static long g_writes_counter = 0;
 static char g_device_name[MAX_DEVICE_NAME_SIZE];
 static uint32_t g_scheduler_mode = 0; //noop mode
-static uint32_t g_write_reqs_per_sec = 0;
 static uint32_t g_record_bytes = 1536;
 static uint32_t g_large_block_ops_bytes = 131072; //128K
+static uint64_t g_total_time_threads = 0;
 static uint64_t g_read_reqs_per_sec = 0;
 static uint64_t g_run_us = 0;
 
@@ -84,16 +87,17 @@ static device* g_device;
 static void	set_scheduler();
 static void *read_op(void *thread_num);
 static void *write_op(void *thread_num);
-static bool config_parse_device_name(char* device);
-static bool	configure(int argc, char* argv[]);
-static bool discover_num_blocks(device* p_device);
+static void thread_creation_op(int num_of_threads);
 static int fd_get(device* p_device);
 static uint64_t rand_48();
-static inline uint64_t safe_delta_ns(uint64_t start_ns, uint64_t stop_ns);
 static uint64_t discover_min_op_bytes(int fd, const char *name);
+static inline uint64_t safe_delta_ns(uint64_t start_ns, uint64_t stop_ns);
 static inline uint64_t random_read_offset(device* p_device);
 static inline uint8_t* cf_valloc(size_t size);
 static inline uint8_t* align_4096(uint8_t* stack_buffer);
+static bool config_parse_device_name(char* device);
+static bool	configure(int argc, char* argv[]);
+static bool discover_num_blocks(device* p_device);
 static bool read_from_device(device* p_device, uint64_t offset,
 					uint32_t size, char* p_buffer);
 static bool write_to_device(device* p_device, uint64_t offset,
@@ -114,39 +118,42 @@ int main(int argc, char* argv[]) {
 
 	g_running = true;
 
-	//Create and initiate threads
-	pthread_t threads[NUM_OF_THREADS];
-	int i;
-	for (i=0; i < (NUM_OF_THREADS*3)/4; i++){
-		int *thread_num = malloc(sizeof(int *));
-		*thread_num = i;
-		pthread_create(&(threads[i]), NULL, read_op, thread_num);
-		pthread_mutex_lock(&running_mutex);
-    	g_running_threads++;
-    	pthread_mutex_unlock(&running_mutex);
-	}
-	for (i= (NUM_OF_THREADS*3)/4; i < NUM_OF_THREADS; i++){
-		int *thread_num = malloc(sizeof(int *));
-		*thread_num = i;
-		pthread_create(&(threads[i]), NULL, write_op, thread_num);
-		pthread_mutex_lock(&running_mutex);
-    	g_running_threads++;
-    	pthread_mutex_unlock(&running_mutex);
-	}
+    thread_creation_op(NUM_OF_INIT_THREADS);
 
-	uint64_t run_stop_us = cf_getus() + g_run_us;
-	uint64_t now_us = 0;
+	float delay = 0.90;
+	uint64_t now_us = 0, main_start_time = cf_getus(), main_total_time;
+	uint64_t run_stop_us = main_start_time + g_run_us;
+	
 
 	while (g_running && (now_us = cf_getus()) < run_stop_us){
-		sleep(1);
+		//sleep(1);
+		if (cf_getus() >= (run_stop_us - g_run_us*delay) && delay > 0.10){
+			thread_creation_op(4);
+			delay -= 0.1;
+			printf("Remaining time: %" PRIu64 " seconds\n", (run_stop_us - now_us)/1000000);
+		}
 	}
+
+	/*while (g_running && (now_us = cf_getus()) < run_stop_us){
+		sleep(5);
+		thread_creation_op(4);
+	}*/
 
 	g_running = false;
 
 	while (g_running_threads > 0);
 
-	fprintf(g_output_file,"\n => Raw Device Access - output file closed.\n");
+	main_total_time = cf_getus() - main_start_time;
+	printf("\nDone!\n");
+
 	fprintf(g_output_file, "__________________________________________\n");
+	fprintf(g_output_file, "Total time: %" PRIu64 " s\n", main_total_time/1000000);
+	fprintf(g_output_file, "Total threads created: %d\n", g_read_threads + g_write_threads);
+	fprintf(g_output_file, "Average reads operations counter: %" PRIu64 "\n", g_reads_counter/g_read_threads);
+	fprintf(g_output_file, "Average writes operations counter: %" PRIu64 "\n", g_writes_counter/g_write_threads);
+	fprintf(g_output_file, "Average operations counter: %" PRIu64 "\n", (g_reads_counter + g_writes_counter)/(g_read_threads + g_write_threads));
+	fprintf(g_output_file,"\n => Raw Device Access - output file closed.\n");
+	fprintf(g_output_file, "===========================================\n");
 	fclose(g_output_file);
 	free(g_device);
 	return 0;
@@ -157,94 +164,131 @@ int main(int argc, char* argv[]) {
 //
 
 //------------------------------------------------
+// Thread Creation Operation.
+//
+static void thread_creation_op(int num_of_threads){
+	int i;
+	pthread_t threads[num_of_threads];
+	
+	for (i=0; i < (num_of_threads*3)/4; i++){
+		int *thread_num = malloc(sizeof(int *));
+		*thread_num = (int)g_running_threads;
+		pthread_create(&(threads[i]), NULL, read_op, thread_num);
+
+		pthread_mutex_lock(&running_mutex);
+		g_read_threads++;
+    	g_running_threads++;
+    	pthread_mutex_unlock(&running_mutex);
+	}
+	for (i= (num_of_threads*3)/4; i < num_of_threads; i++){
+		int *thread_num = malloc(sizeof(int *));
+		*thread_num = (int)g_running_threads;
+		pthread_create(&(threads[i]), NULL, write_op, thread_num);
+
+		pthread_mutex_lock(&running_mutex);
+		g_write_threads++;
+    	g_running_threads++;
+    	pthread_mutex_unlock(&running_mutex);
+	}
+}
+
+//------------------------------------------------
 // Thread Read Operation.
 //
 static void *read_op(void *thread_num){
-	printf("\n-> Reading thread %d running!\n", *((int *) thread_num));
+	//printf("\n-> Reading thread %d running!\n", *((int *) thread_num));
 	int i, counter = 0;	
 	uint64_t begin_op_time, op_time = 0, offset;
 	char* p_buffer = cf_valloc(g_device->read_bytes);
 
-	if (p_buffer) {
-		uint64_t start_time = cf_getns();
-		while (g_running){
-			offset = random_read_offset(g_device);
-			begin_op_time = cf_getns();
-			if (! read_from_device(g_device, offset, g_device->read_bytes, p_buffer)){
-				fprintf(g_output_file, "=> ERROR read op number: %d; Offset: %" PRIu64 "\n", i, offset);
-			}
-			else{
-				op_time += safe_delta_ns(begin_op_time, cf_getns());
-				counter++;
-			}
-		}
-		uint64_t stop_time = cf_getns();
-
-		pthread_mutex_lock(&running_mutex);
-		fprintf(g_output_file,"\n-> Performance Information from READING thread %d:\n", *((int *) thread_num));
-		fprintf(g_output_file," - Total Time: %" PRIu64 "\n", stop_time - start_time);
-		fprintf(g_output_file," - Counter thread: %d \n", counter);
-		fprintf(g_output_file," - Operations Time: %" PRIu64 "\n", op_time);
-		fprintf(g_output_file," - Ops per sec: %d\n", (int)((float)counter/((float)op_time/1000000000)));
-		g_running_threads--;
-		pthread_mutex_unlock(&running_mutex);
-	}	
-	else {
+	if (! p_buffer) {
 		fprintf(stdout, "=> ERROR: read buffer cf_valloc()\n");
-	}	
+		return NULL;
+	}
+
+	uint64_t start_time = cf_getns();
+	while (g_running){
+		offset = random_read_offset(g_device);
+		begin_op_time = cf_getns();
+		if (! read_from_device(g_device, offset, g_device->read_bytes, p_buffer)){
+			fprintf(g_output_file, "=> ERROR read op number: %d; Offset: %" PRIu64 "\n", i, offset);
+		}
+		else{
+			op_time += safe_delta_ns(begin_op_time, cf_getns());
+			counter++;
+		}
+	}
+	uint64_t stop_time = cf_getns();
+
+	pthread_mutex_lock(&running_mutex);
+	/*fprintf(g_output_file,"\n-> Performance Information from READING thread %d:\n", *((int *) thread_num));
+	fprintf(g_output_file," - Total Time: %" PRIu64 " ms\n", (stop_time - start_time)/1000000);
+	fprintf(g_output_file," - Counter thread: %d \n", counter);
+	fprintf(g_output_file," - Operations Time: %" PRIu64 " ms\n", op_time/1000000);
+	fprintf(g_output_file," - Ops per sec: %d\n", (int)((float)counter/((float)(stop_time - start_time)/1000000000)));
+	*/
+	g_reads_counter += counter;
+	g_total_time_threads += (stop_time - start_time);
+	g_running_threads--;
+	pthread_mutex_unlock(&running_mutex);
 
    	free(p_buffer);
    	free(thread_num);
+   	return NULL;
 }
 
 //------------------------------------------------
 // Thread Write Operation.
 //
 static void *write_op(void *thread_num){
-	printf("\n-> Writing thread %d running!\n", *((int *) thread_num));
+	//printf("\n-> Writing thread %d running!\n", *((int *) thread_num));
 	int i, counter = 0;
 	uint64_t begin_op_time, op_time = 0, offset;
+	char* message = "Hello SSD. Regards from WRITING thread!";
 	char* p_buffer = cf_valloc(g_device->read_bytes);
-	char* message = "Hello SSD. I'm accessing you directly and writing on a sector. Regards from WRITING thread!";
 
-	if (p_buffer) {
-		strcpy(p_buffer, message);
-		uint64_t start_time = cf_getns();
-		while (g_running){
-			offset = random_read_offset(g_device);
-			begin_op_time = cf_getns();
-			if (! write_to_device(g_device, offset, g_device->read_bytes, p_buffer)){
-				fprintf(g_output_file, "=> ERROR write op number: %d; Offset: %" PRIu64 "\n", i, offset);
-			}
-			else{
-				op_time += safe_delta_ns(begin_op_time, cf_getns());
-				counter++;
-			}
-		}
-		uint64_t stop_time = cf_getns();
+	if (! p_buffer) {
+		fprintf(stdout, "=> ERROR: write buffer cf_valloc()\n");
+		return NULL;
+	}
 
-		pthread_mutex_lock(&running_mutex);
-		fprintf(g_output_file,"\n-> Performance Information from WRITING thread %d:\n", *((int *) thread_num));
-		fprintf(g_output_file," - Total Time: %" PRIu64 "\n", stop_time - start_time);
-		fprintf(g_output_file," - Counter thread: %d \n", counter);
-		fprintf(g_output_file," - Operations Time: %" PRIu64 "\n", op_time);
-		fprintf(g_output_file," - Ops per sec: %d\n", (int)((float)counter/((float)op_time/1000000000)));
-		if (! read_from_device(g_device, offset, g_device->read_bytes, p_buffer)){
-			fprintf(g_output_file, "=> ERROR on LAST read op; Offset: %" PRIu64 "\n", offset);
+	strcpy(p_buffer, message);
+
+	uint64_t start_time = cf_getns();
+	while (g_running){
+		offset = random_read_offset(g_device);
+		begin_op_time = cf_getns();
+		if (! write_to_device(g_device, offset, g_device->read_bytes, p_buffer)){
+			fprintf(g_output_file, "=> ERROR write op number: %d; Offset: %" PRIu64 "\n", i, offset);
 		}
 		else{
-			fprintf(g_output_file, " - Reading from LAST writed sector:\n%s (Size: %d)\n", p_buffer, (int)strlen(p_buffer));
+			op_time += safe_delta_ns(begin_op_time, cf_getns());
+			counter++;
 		}
-		g_running_threads--;
-		pthread_mutex_unlock(&running_mutex);
-
-	}		
-	else {
-		fprintf(stdout, "=> ERROR: write buffer cf_valloc()\n");
 	}
+	uint64_t stop_time = cf_getns();
+
+	pthread_mutex_lock(&running_mutex);
+	/*fprintf(g_output_file,"\n-> Performance Information from WRITING thread %d:\n", *((int *) thread_num));
+	fprintf(g_output_file," - Total Time: %" PRIu64 " ms\n", (stop_time - start_time)/1000000);
+	fprintf(g_output_file," - Counter thread: %d \n", counter);
+	fprintf(g_output_file," - Operations Time: %" PRIu64 " ms\n", op_time/1000000);
+	fprintf(g_output_file," - Ops per sec: %d\n", (int)((float)counter/((float)(stop_time - start_time)/1000000000)));
+	if (! read_from_device(g_device, offset, g_device->read_bytes, p_buffer)){
+		fprintf(g_output_file, "=> ERROR on LAST read op. Offset: %" PRIu64 "\n", offset);
+	}
+	else{
+		fprintf(g_output_file, " - Reading from LAST writed sector:\n  - %s%d (Size: %d)\n", p_buffer,
+		 *((int *) thread_num), (int)strlen(p_buffer));
+	}*/
+	g_writes_counter += counter;
+	g_total_time_threads += (stop_time - start_time);
+	g_running_threads--;
+	pthread_mutex_unlock(&running_mutex);
 
    	free(p_buffer);
    	free(thread_num);
+   	return NULL;
 }
 
 //==========================================================
@@ -295,7 +339,7 @@ static bool config_out_file(char *fileName){
 	}
 	else{
 		g_output_file = out;
-		fprintf(g_output_file, "__________________________________________\n");
+		fprintf(g_output_file, "===========================================\n");
 		fprintf(g_output_file, "=> Raw Device Access - output file created\n\n");
 		printf("-> Output file created. Access it when done.\n");
 	}
@@ -393,7 +437,7 @@ static bool discover_num_blocks(device* p_device) {
 	return true;
 }
 
-
+	
 //------------------------------------------------
 // Do one device read operation.
 //
@@ -425,14 +469,14 @@ static bool write_to_device(device* p_device, uint64_t offset, uint32_t size, ui
 		return false;
 	}
 
-	pthread_mutex_lock(&running_mutex);
+	//pthread_mutex_lock(&running_mutex);
 	if (lseek(fd, offset, SEEK_SET) != offset ||
 			write(fd, p_buffer, size) != (ssize_t)size) {
 		close(fd);
 		fprintf(g_output_file, "=> ERROR: Couldn't seek & write\n");
 		return false;
 	}
-	pthread_mutex_unlock(&running_mutex);
+	//pthread_mutex_unlock(&running_mutex);
 
 	uint64_t stop_ns = cf_getns();
 	return true;
@@ -525,9 +569,9 @@ static inline uint64_t safe_delta_ns(uint64_t start_ns, uint64_t stop_ns) {
 //------------------------------------------------
 // Align stack-allocated memory.
 //
-/*static inline uint8_t* align_4096(uint8_t* stack_buffer) {
+static inline uint8_t* align_4096(uint8_t* stack_buffer) {
 	return (uint8_t*)(((uint64_t)stack_buffer + 4095) & ~4095ULL);
-}*/
+}
 
 //------------------------------------------------
 // Aligned memory allocation.
