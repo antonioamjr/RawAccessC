@@ -109,7 +109,7 @@ static bool write_to_device(device* p_device, uint64_t offset,
 					uint32_t size, char* p_buffer);
 
 char* readJNA(char* device_name, uint32_t size, uint64_t offset);
-bool writeJNA(char* device_name, char* message , uint32_t size, uint64_t offset);
+bool writeJNA(char* device_name, char* message, uint64_t offset);
 
 //==========================================================
 // Main
@@ -172,8 +172,7 @@ char* readJNA(char* device_name, uint32_t size, uint64_t offset){
 	if (! config_parse_device_name(device_name)){
 		printf("=> ERROR: Couldn't parse device name: %s\n", device_name);
 		exit(-1);
-	}else
-	{g_record_bytes = size;}
+	}
 
 	if (! discover_num_blocks(g_device)){
 		printf("=> ERROR: Couldn't discover number of blocks.\n");
@@ -181,6 +180,7 @@ char* readJNA(char* device_name, uint32_t size, uint64_t offset){
 	}
 
 	set_scheduler(); //here?	
+	g_record_bytes = ((size + g_device->min_op_bytes - 1) / g_device->min_op_bytes) * g_device->min_op_bytes;
 
 	char *message, *p_buffer = cf_valloc(g_device->read_bytes);
 
@@ -207,12 +207,11 @@ char* readJNA(char* device_name, uint32_t size, uint64_t offset){
 //------------------------------------------------
 // 
 //
-bool writeJNA(char* device_name, char* message , uint32_t size, uint64_t offset){
+bool writeJNA(char* device_name, char* message, uint64_t offset){
 	if (! config_parse_device_name(device_name)){
 		printf("=> ERROR: Couldn't parse device name: %s\n", device_name);
 		exit(-1);
-	}else
-	{g_record_bytes = size;}
+	}
 
 	if (! discover_num_blocks(g_device)){
 		printf("=> ERROR: Couldn't discover number of blocks.\n");
@@ -220,6 +219,8 @@ bool writeJNA(char* device_name, char* message , uint32_t size, uint64_t offset)
 	}
 
 	set_scheduler(); //here?
+	g_record_bytes = (uint32_t)
+		(((uint32_t)strlen(message) + g_device->min_op_bytes - 1) / g_device->min_op_bytes) * g_device->min_op_bytes;
 
 	char *p_buffer = cf_valloc(g_device->read_bytes);
 
