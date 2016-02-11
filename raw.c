@@ -68,7 +68,7 @@ static long g_writes_counter = 0;
 static char g_device_name[MAX_DEVICE_NAME_SIZE];
 static uint32_t g_number_of_threads = 0;
 static uint32_t g_scheduler_mode = 0; //noop mode
-static uint32_t g_record_bytes = 1048576; //1536;
+static uint32_t g_record_bytes = 512;//1536; //1048576; 
 static uint32_t g_large_block_ops_bytes = 131072; //128K
 static uint64_t g_ops_times[LATENCY_MAX_NUM][2];
 // static uint64_t g_total_time_threads = 0;
@@ -86,13 +86,13 @@ static device* g_device;
 //==========================================================
 // Forward Declarations
 //
+static int fd_get(device* p_device);
 static void	set_scheduler();
 static void print_final_info();
 static void *read_op(void *thread_num);
 static void *write_op(void *thread_num);
 static void array_add(uint64_t value);
 static void percentile_array(uint64_t array[][2]);
-static int fd_get(device* p_device);
 static uint64_t rand_48();
 static uint64_t discover_min_op_bytes(int fd, const char *name);
 static inline uint64_t safe_delta_ns(uint64_t start_ns, uint64_t stop_ns);
@@ -106,7 +106,10 @@ static bool discover_num_blocks(device* p_device);
 static bool read_from_device(device* p_device, uint64_t offset,
 					uint32_t size, char* p_buffer);
 static bool write_to_device(device* p_device, uint64_t offset,
-					uint32_t size, uint8_t* p_buffer);
+					uint32_t size, char* p_buffer);
+
+char* readJNA(char* device_name, uint32_t size, uint64_t offset);
+bool writeJNA(char* device_name, char* message , uint32_t size, uint64_t offset);
 
 //==========================================================
 // Main
@@ -156,6 +159,87 @@ int main(int argc, char* argv[]) {
 	fclose(g_output_file);
 	free(g_device);
 	return 0;
+}
+
+//==========================================================
+// Interface functions for JNA/JNI use
+//
+
+//------------------------------------------------
+// 
+//
+char* readJNA(char* device_name, uint32_t size, uint64_t offset){
+	if (! config_parse_device_name(device_name)){
+		printf("=> ERROR: Couldn't parse device name: %s\n", device_name);
+		exit(-1);
+	}else
+	{g_record_bytes = size;}
+
+	if (! discover_num_blocks(g_device)){
+		printf("=> ERROR: Couldn't discover number of blocks.\n");
+		exit(-1);
+	}
+
+	set_scheduler(); //here?	
+
+	char *message, *p_buffer = cf_valloc(g_device->read_bytes);
+
+	if (! p_buffer) {
+		printf("=> ERROR: read buffer cf_valloc()\n");
+		return NULL;
+	}
+
+	offset = (offset % g_device->num_read_offsets) * g_device->min_op_bytes;
+	//offset = random_read_offset(g_device);
+
+	if (! read_from_device(g_device, offset, g_device->read_bytes, p_buffer)){
+			printf("=> ERROR read op on offset: %" PRIu64 "\n", offset);
+			free(p_buffer);
+			exit(-1);
+	}
+
+	message = p_buffer;
+	free(p_buffer);
+	free(g_device);
+	return message;
+}
+
+//------------------------------------------------
+// 
+//
+bool writeJNA(char* device_name, char* message , uint32_t size, uint64_t offset){
+	if (! config_parse_device_name(device_name)){
+		printf("=> ERROR: Couldn't parse device name: %s\n", device_name);
+		exit(-1);
+	}else
+	{g_record_bytes = size;}
+
+	if (! discover_num_blocks(g_device)){
+		printf("=> ERROR: Couldn't discover number of blocks.\n");
+		exit(-1);
+	}
+
+	set_scheduler(); //here?
+
+	char *p_buffer = cf_valloc(g_device->read_bytes);
+
+	if (! p_buffer) {
+		printf("=> ERROR: read buffer cf_valloc()\n");
+		return false;
+	}
+
+	offset = (offset % g_device->num_read_offsets) * g_device->min_op_bytes;
+	strcpy(p_buffer, message);
+
+	if (! write_to_device(g_device, offset, g_device->read_bytes, p_buffer)){
+			printf("=> ERROR write op on offset: %" PRIu64 "\n", offset);
+			free(p_buffer);
+			exit(-1);
+	}	
+	
+	free(p_buffer);
+	free(g_device);
+	return true;
 }
 
 //==========================================================
@@ -225,12 +309,12 @@ static bool thread_creation_op(int num_of_threads){
 //
 static void *read_op(void *thread_num){
 	//printf("\n-> Reading thread %d running!\n", *((int *) thread_num));
-	int i, counter = 0;	
+	int counter = 0;	
 	uint64_t begin_op_time, op_time = 0, offset;
 	char* p_buffer = cf_valloc(g_device->read_bytes);
 
 	if (! p_buffer) {
-		fprintf(stdout, "=> ERROR: read buffer cf_valloc()\n");
+		printf("=> ERROR: read buffer cf_valloc()\n");
 		return NULL;
 	}
 
@@ -239,7 +323,7 @@ static void *read_op(void *thread_num){
 		offset = random_read_offset(g_device);
 		begin_op_time = cf_getms();
 		if (! read_from_device(g_device, offset, g_device->read_bytes, p_buffer)){
-			fprintf(g_output_file, "=> ERROR read op number: %d; Offset: %" PRIu64 "\n", i, offset);
+			printf("=> ERROR read op number: %d; Offset: %" PRIu64 "\n", counter+1, offset);
 		}
 		else{
 			//op_time += safe_delta_ns(begin_op_time, cf_getns());
@@ -265,13 +349,13 @@ static void *read_op(void *thread_num){
 //
 static void *write_op(void *thread_num){
 	//printf("\n-> Writing thread %d running!\n", *((int *) thread_num));
-	int i, counter = 0;
+	int counter = 0;
 	uint64_t begin_op_time, /*op_time = 0,*/ offset;
 	char* message = "Hello SSD. Regards from WRITING thread!";
 	char* p_buffer = cf_valloc(g_device->read_bytes);
 
 	if (! p_buffer) {
-		fprintf(stdout, "=> ERROR: write buffer cf_valloc()\n");
+		printf("=> ERROR: write buffer cf_valloc()\n");
 		return NULL;
 	}
 
@@ -282,7 +366,7 @@ static void *write_op(void *thread_num){
 		offset = random_read_offset(g_device);
 		begin_op_time = cf_getms();
 		if (! write_to_device(g_device, offset, g_device->read_bytes, p_buffer)){
-			fprintf(g_output_file, "=> ERROR write op number: %d; Offset: %" PRIu64 "\n", i, offset);
+			printf("=> ERROR write op number: %d; Offset: %" PRIu64 "\n", counter+1, offset);
 		}
 		else{
 			//op_time += safe_delta_ns(begin_op_time, cf_getns());
@@ -332,12 +416,28 @@ static void print_final_info(uint64_t main_total_time){
 }
 
 //------------------------------------------------
-// Parse if argument is a number
+// Parse if argument has alphas
+//
+static bool config_is_arg_alpha(char *argv){
+	char *arg = argv;
+	while (*arg != 0){
+	    if( isalpha(*arg) ){
+	    	arg++; 
+	    }
+	    else{
+	    	return false;
+	    }        
+	}
+	return true;
+}
+
+//------------------------------------------------
+// Parse if argument has a number
 //
 static bool config_is_arg_num(char *argv){
 	char *arg = argv;
 	while (*arg != 0){
-	    if( isdigit( *arg) ){
+	    if( isdigit(*arg) ){
 	    	arg++; 
 	    }
 	    else{
@@ -354,7 +454,7 @@ static bool config_parse_device_name(char *p_device_name){
 	if (strlen(p_device_name) > MAX_DEVICE_NAME_SIZE){
 		return false;
 	}
-	
+
 	strcpy(g_device_name, p_device_name);
 	device* dev = malloc(sizeof(device));
 	dev->name = g_device_name;
@@ -391,7 +491,7 @@ static bool	configure(int argc, char* argv[]){
 	}
 
 	if (! config_out_file(argv[4])){
-		printf("=> ERROR: Couldn't create output file: %s\n", argv[3]);
+		printf("=> ERROR: Couldn't create output file: %s\n", argv[4]);
 		return false;
 	}
 
@@ -429,10 +529,86 @@ static int fd_get(device* p_device) {
 	fd = open(p_device->name, O_DIRECT | O_RDWR, S_IRUSR | S_IWUSR);
 
 	if (fd == -1){
-		fprintf(g_output_file, "=> ERROR: Couldn't open device %s\n", p_device->name);
+		printf("=> ERROR: Couldn't open device %s\n", p_device->name);
 	}
 
 	return fd;
+}
+	
+//------------------------------------------------
+// Do one device read operation.
+//
+static bool read_from_device(device* p_device,uint64_t offset,uint32_t size, char* p_buffer) {
+	int fd = g_fd_device; //fd_get(p_device);
+
+	if (fd == -1) {
+		return false;
+	}
+
+	if (lseek(fd, offset, SEEK_SET) != offset ||
+			read(fd, p_buffer, size) != (ssize_t)size) {
+		close(fd);
+		printf("=> ERROR: Couldn't seek & read\n");
+		return false;
+	}
+	
+	uint64_t stop_ns = cf_getns();
+	return true;
+}
+
+//------------------------------------------------
+// Do one device write operation.
+//
+static bool write_to_device(device* p_device, uint64_t offset, uint32_t size, char* p_buffer) {
+	int fd = g_fd_device; //fd_get(p_device);
+
+	if (fd == -1) {
+		return false;
+	}
+
+	//pthread_mutex_lock(&running_mutex);
+	if (lseek(fd, offset, SEEK_SET) != offset ||
+			write(fd, p_buffer, size) != (ssize_t)size) {
+		close(fd);
+		printf("=> ERROR: Couldn't seek & write\n");
+		return false;
+	}
+	//pthread_mutex_unlock(&running_mutex);
+
+	uint64_t stop_ns = cf_getns();
+	return true;
+}
+
+//------------------------------------------------
+// Set devices' system block schedulers.
+//
+static void set_scheduler() {
+	const char* mode = SCHEDULER_MODES[g_scheduler_mode];
+	size_t mode_length = strlen(mode);
+	
+	const char* device_name = g_device_name;
+	const char* p_slash = strrchr(device_name, '/');
+	const char* device_tag = p_slash ? p_slash + 1 : device_name;
+
+	char scheduler_file_name[128];
+
+	strcpy(scheduler_file_name, "/sys/block/");
+	strcat(scheduler_file_name, device_tag);
+	strcat(scheduler_file_name, "/queue/scheduler");
+
+	FILE* scheduler_file = fopen(scheduler_file_name, "w");
+
+	if (! scheduler_file) {
+		printf("=> ERROR: couldn't open %s\n", scheduler_file_name);
+	}
+
+	else if (fwrite(mode, mode_length, 1, scheduler_file) != 1) {
+		printf("=> ERROR: writing %s to %s\n", mode,
+			scheduler_file_name);
+	}
+	else{
+		fclose(scheduler_file);
+	}
 }
 
 //------------------------------------------------
@@ -466,89 +642,15 @@ static bool discover_num_blocks(device* p_device) {
 	p_device->num_read_offsets = num_min_op_blocks - read_req_min_op_blocks + 1;
 	p_device->read_bytes = read_req_min_op_blocks * p_device->min_op_bytes;
 
-	fprintf(g_output_file, "-> Blocks Infomation:\n - %s size = %" PRIu64 " bytes\n - %" PRIu64 " large blocks\n - "
-		"%" PRIu64 " %" PRIu32 "-byte blocks\n - buffers are %" PRIu32 " bytes\n",
-			p_device->name, device_bytes, p_device->num_large_blocks,
-			num_min_op_blocks, p_device->min_op_bytes, p_device->read_bytes);
-	fprintf(g_output_file, "__________________________________________\n");
+	if (g_output_file){
+		fprintf(g_output_file, "-> Blocks Infomation:\n - %s size = %" PRIu64 " bytes\n - %" PRIu64 " large blocks\n - "
+			"%" PRIu64 " %" PRIu32 "-byte blocks\n - buffers are %" PRIu32 " bytes\n",
+				p_device->name, device_bytes, p_device->num_large_blocks,
+				num_min_op_blocks, p_device->min_op_bytes, p_device->read_bytes);
+		fprintf(g_output_file, "__________________________________________\n");
+	}
 
 	return true;
-}
-	
-//------------------------------------------------
-// Do one device read operation.
-//
-static bool read_from_device(device* p_device,uint64_t offset,uint32_t size, char* p_buffer) {
-	int fd = g_fd_device; //fd_get(p_device);
-
-	if (fd == -1) {
-		return false;
-	}
-
-	if (lseek(fd, offset, SEEK_SET) != offset ||
-			read(fd, p_buffer, size) != (ssize_t)size) {
-		close(fd);
-		fprintf(g_output_file, "=> ERROR: Couldn't seek & read\n");
-		return false;
-	}
-	
-	uint64_t stop_ns = cf_getns();
-	return true;
-}
-
-//------------------------------------------------
-// Do one device write operation.
-//
-static bool write_to_device(device* p_device, uint64_t offset, uint32_t size, uint8_t* p_buffer) {
-	int fd = g_fd_device; //fd_get(p_device);
-
-	if (fd == -1) {
-		return false;
-	}
-
-	//pthread_mutex_lock(&running_mutex);
-	if (lseek(fd, offset, SEEK_SET) != offset ||
-			write(fd, p_buffer, size) != (ssize_t)size) {
-		close(fd);
-		fprintf(g_output_file, "=> ERROR: Couldn't seek & write\n");
-		return false;
-	}
-	//pthread_mutex_unlock(&running_mutex);
-
-	uint64_t stop_ns = cf_getns();
-	return true;
-}
-
-//------------------------------------------------
-// Set devices' system block schedulers.
-//
-static void set_scheduler() {
-	const char* mode = SCHEDULER_MODES[g_scheduler_mode];
-	size_t mode_length = strlen(mode);
-	
-	const char* device_name = g_device_name;
-	const char* p_slash = strrchr(device_name, '/');
-	const char* device_tag = p_slash ? p_slash + 1 : device_name;
-
-	char scheduler_file_name[128];
-
-	strcpy(scheduler_file_name, "/sys/block/");
-	strcat(scheduler_file_name, device_tag);
-	strcat(scheduler_file_name, "/queue/scheduler");
-
-	FILE* scheduler_file = fopen(scheduler_file_name, "w");
-
-	if (! scheduler_file) {
-		fprintf(g_output_file, "=> ERROR: couldn't open %s\n", scheduler_file_name);
-	}
-
-	else if (fwrite(mode, mode_length, 1, scheduler_file) != 1) {
-		fprintf(g_output_file, "=> ERROR: writing %s to %s\n", mode,
-			scheduler_file_name);
-	}
-	else{
-		fclose(scheduler_file);
-	}
 }
 
 //------------------------------------------------
@@ -558,7 +660,7 @@ static uint64_t discover_min_op_bytes(int fd, const char *name) {
 	off_t off = lseek(fd, 0, SEEK_SET);
 
 	if (off != 0) {
-		fprintf(g_output_file, "=> ERROR: %s seek\n", name);
+		printf("=> ERROR: %s seek\n", name);
 		return 0;
 	}
 
@@ -574,11 +676,10 @@ static uint64_t discover_min_op_bytes(int fd, const char *name) {
 		read_sz <<= 1; // LO_IO_MIN_SIZE and HI_IO_MIN_SIZE are powers of 2
 	}
 
-	fprintf(g_output_file, "=> ERROR: %s read failed at all sizes from %u to %u bytes\n",
+	printf("=> ERROR: %s read failed at all sizes from %u to %u bytes\n",
 			name, LO_IO_MIN_SIZE, HI_IO_MIN_SIZE);
 
 	free(buf);
-
 	return 0;
 }
 
@@ -587,7 +688,7 @@ static uint64_t discover_min_op_bytes(int fd, const char *name) {
 //
 static void array_add(uint64_t value){
 	int i =0;
-	while (g_ops_times[i][0] != 0){
+	while (g_ops_times[i][1] != 0){
 		if (g_ops_times[i][0] == value){
 			pthread_mutex_lock(&running_mutex);
 			g_ops_times[i][1]++;
@@ -605,7 +706,7 @@ static void array_add(uint64_t value){
 static void percentile_array(uint64_t array[][2]){
 	int i=0, j=0, max;
 
-	while (g_ops_times[i][0] != 0){i++;}
+	while (g_ops_times[i][1] != 0){i++;}
 	max = i;
 
 	for (i=0; i<max; i++){
@@ -626,25 +727,25 @@ static void percentile_array(uint64_t array[][2]){
 	max = g_reads_counter + g_writes_counter;
 	int counter = 0, perc50 = 50*(max+1)/100, perc90 = 90*(max+1)/100;
 
-	i=0;
-	while (g_ops_times[i][0] != 0){
-		i++;
-		fprintf(g_output_file, "[%"PRIu64"]= %"PRIu64" ", g_ops_times[i][1], g_ops_times[i][0]);
-	}
-
-	fprintf(g_output_file, "\n");
-
 	for (i=0; i < LATENCY_MAX_NUM; i++){
 		counter += g_ops_times[i][1];
 		if (counter >= perc50){
 			fprintf(g_output_file, "50th percentile: %"PRIu64" ms\n", g_ops_times[i][0]);
 			perc50 = perc90*2;
 		}
-		if (counter >= perc90){
+		if (counter >= perc90 || g_ops_times[i+1][1] == 0){
 			fprintf(g_output_file, "90th percentile: %"PRIu64" ms\n", g_ops_times[i][0]);
 			return;
 		}	
 	}
+
+	/*i=0;
+	while (g_ops_times[i][1] != 0){
+		i++;
+		fprintf(g_output_file, "[%"PRIu64"]= %"PRIu64" ", g_ops_times[i][1], g_ops_times[i][0]);
+	}
+
+	fprintf(g_output_file, "\n");*/
 }
 
 //------------------------------------------------
