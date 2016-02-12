@@ -8,7 +8,7 @@
 //
 #include <inttypes.h>
 #include <fcntl.h>
-#include <pthread.h>
+//#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -28,8 +28,8 @@
 // Constants
 //
 #define MAX_DEVICE_NAME_SIZE 64
-#define THREADS_MAX_NUM 300
-#define LATENCY_MAX_NUM 2000
+//#define THREADS_MAX_NUM 300
+//#define LATENCY_MAX_NUM 2000
 #define WHITE_SPACE " \t\n\r"
 
 // Linux has removed O_DIRECT, but not its functionality.
@@ -59,26 +59,26 @@ const char* const SCHEDULER_MODES[] = {
 //==========================================================
 // Globals
 //
-volatile int g_running_threads = 0;
+//volatile int g_running_threads = 0;
 static int g_fd_device = -1;
-static int g_read_threads = 0;
-static int g_write_threads = 0;
-static long g_reads_counter = 0;
-static long g_writes_counter = 0;
+//static int g_read_threads = 0;
+//static int g_write_threads = 0;
+//static long g_reads_counter = 0;
+//static long g_writes_counter = 0;
 static char g_device_name[MAX_DEVICE_NAME_SIZE];
-static uint32_t g_number_of_threads = 0;
+//static uint32_t g_number_of_threads = 0;
 static uint32_t g_scheduler_mode = 0; //noop mode
 static uint32_t g_record_bytes = 512;//1536; //1048576; 
 static uint32_t g_large_block_ops_bytes = 131072; //128K
-static uint64_t g_ops_times[LATENCY_MAX_NUM][2];
+//static uint64_t g_ops_times[LATENCY_MAX_NUM][2];
 // static uint64_t g_total_time_threads = 0;
-static uint64_t g_read_reqs_per_sec = 0;
-static uint64_t g_run_us = 0;
+//static uint64_t g_read_reqs_per_sec = 0;
+//static uint64_t g_run_us = 0;
 
-static bool g_running;
-static uint64_t g_run_start_us;
+//static bool g_running;
+//static uint64_t g_run_start_us;
 
-static pthread_mutex_t running_mutex = PTHREAD_MUTEX_INITIALIZER;
+//static pthread_mutex_t running_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static FILE* g_output_file;
 static device* g_device;
@@ -88,20 +88,22 @@ static device* g_device;
 //
 static int fd_get(device* p_device);
 static void	set_scheduler();
-static void print_final_info();
-static void *read_op(void *thread_num);
-static void *write_op(void *thread_num);
-static void array_add(uint64_t value);
-static void percentile_array(uint64_t array[][2]);
-static uint64_t rand_48();
+//static void print_final_info();
+//static void *read_op(void *thread_num);
+//static void *write_op(void *thread_num);
+//static void array_add(uint64_t value);
+//static void percentile_array(uint64_t array[][2]);
+//static uint64_t rand_48();
 static uint64_t discover_min_op_bytes(int fd, const char *name);
-static inline uint64_t safe_delta_ns(uint64_t start_ns, uint64_t stop_ns);
-static inline uint64_t random_read_offset(device* p_device);
+//static inline uint64_t safe_delta_ns(uint64_t start_ns, uint64_t stop_ns);
+//static inline uint64_t random_read_offset(device* p_device);
 static inline uint8_t* cf_valloc(size_t size);
-static inline uint8_t* align_4096(uint8_t* stack_buffer);
-static bool thread_creation_op(int num_of_threads);
+//static inline uint8_t* align_4096(uint8_t* stack_buffer);
+//static bool thread_creation_op(int num_of_threads);
+//static bool config_is_arg_alpha(char *argv);
+static bool config_is_arg_num(char *argv);
 static bool config_parse_device_name(char* device);
-static bool	configure(int argc, char* argv[]);
+//static bool	configure(int argc, char* argv[]);
 static bool discover_num_blocks(device* p_device);
 static bool read_from_device(device* p_device, uint64_t offset,
 					uint32_t size, char* p_buffer);
@@ -114,7 +116,7 @@ bool writeJNA(char* device_name, char* message, uint64_t offset);
 //==========================================================
 // Main
 //
-int main(int argc, char* argv[]) {
+/*int main(int argc, char* argv[]) {
 	printf("\n=> Raw Device Access - direct IO test Begins\n");
 
 	if (! configure(argc, argv)){
@@ -159,7 +161,7 @@ int main(int argc, char* argv[]) {
 	fclose(g_output_file);
 	free(g_device);
 	return 0;
-}
+}*/
 
 //==========================================================
 // Interface functions for JNA/JNI use
@@ -172,7 +174,8 @@ char* readJNA(char* device_name, uint32_t size, uint64_t offset){
 	if (! config_parse_device_name(device_name)){
 		printf("=> ERROR: Couldn't parse device name: %s\n", device_name);
 		exit(-1);
-	}
+	}else
+	{g_record_bytes = size;}
 
 	if (! discover_num_blocks(g_device)){
 		printf("=> ERROR: Couldn't discover number of blocks.\n");
@@ -180,8 +183,6 @@ char* readJNA(char* device_name, uint32_t size, uint64_t offset){
 	}
 
 	set_scheduler(); //here?	
-	g_record_bytes = ((size + g_device->min_op_bytes - 1) / g_device->min_op_bytes) * g_device->min_op_bytes;
-
 	char *message, *p_buffer = cf_valloc(g_device->read_bytes);
 
 	if (! p_buffer) {
@@ -211,7 +212,8 @@ bool writeJNA(char* device_name, char* message, uint64_t offset){
 	if (! config_parse_device_name(device_name)){
 		printf("=> ERROR: Couldn't parse device name: %s\n", device_name);
 		exit(-1);
-	}
+	}else
+	{g_record_bytes = (uint32_t)strlen(message);}
 
 	if (! discover_num_blocks(g_device)){
 		printf("=> ERROR: Couldn't discover number of blocks.\n");
@@ -219,9 +221,6 @@ bool writeJNA(char* device_name, char* message, uint64_t offset){
 	}
 
 	set_scheduler(); //here?
-	g_record_bytes = (uint32_t)
-		(((uint32_t)strlen(message) + g_device->min_op_bytes - 1) / g_device->min_op_bytes) * g_device->min_op_bytes;
-
 	char *p_buffer = cf_valloc(g_device->read_bytes);
 
 	if (! p_buffer) {
@@ -250,7 +249,7 @@ bool writeJNA(char* device_name, char* message, uint64_t offset){
 //------------------------------------------------
 // Thread Creation Operation.
 //
-static bool thread_creation_op(int num_of_threads){
+/*static bool thread_creation_op(int num_of_threads){
 	int i;
 	pthread_t threads[num_of_threads];
 
@@ -351,7 +350,7 @@ static void *read_op(void *thread_num){
 static void *write_op(void *thread_num){
 	//printf("\n-> Writing thread %d running!\n", *((int *) thread_num));
 	int counter = 0;
-	uint64_t begin_op_time, /*op_time = 0,*/ offset;
+	uint64_t begin_op_time, offset;
 	char* message = "Hello SSD. Regards from WRITING thread!";
 	char* p_buffer = cf_valloc(g_device->read_bytes);
 
@@ -362,7 +361,6 @@ static void *write_op(void *thread_num){
 
 	strcpy(p_buffer, message);
 
-	//uint64_t start_time = cf_getns();
 	while (g_running){
 		offset = random_read_offset(g_device);
 		begin_op_time = cf_getms();
@@ -370,7 +368,6 @@ static void *write_op(void *thread_num){
 			printf("=> ERROR write op number: %d; Offset: %" PRIu64 "\n", counter+1, offset);
 		}
 		else{
-			//op_time += safe_delta_ns(begin_op_time, cf_getns());
 			array_add(safe_delta_ns(begin_op_time, cf_getms()));
 			counter++;
 		}
@@ -379,7 +376,6 @@ static void *write_op(void *thread_num){
 
 	pthread_mutex_lock(&running_mutex);
 	g_writes_counter += counter;
-	// g_total_time_threads += (stop_time - start_time);
 	g_running_threads--;
 	pthread_mutex_unlock(&running_mutex);
 
@@ -430,7 +426,7 @@ static bool config_is_arg_alpha(char *argv){
 	    }        
 	}
 	return true;
-}
+}*/
 
 //------------------------------------------------
 // Parse if argument has a number
@@ -467,7 +463,7 @@ static bool config_parse_device_name(char *p_device_name){
 //------------------------------------------------
 // Create Output File.
 //
-static bool config_out_file(char *fileName){
+/*static bool config_out_file(char *fileName){
 	FILE* out = fopen(fileName, "w");
 
 	if (! out) {
@@ -519,7 +515,7 @@ static bool	configure(int argc, char* argv[]){
 	}
 
 	return true;
-}
+}*/
 
 //------------------------------------------------
 // Get a safe file descriptor for a device.
@@ -687,7 +683,7 @@ static uint64_t discover_min_op_bytes(int fd, const char *name) {
 //------------------------------------------------
 // Add to a array
 //
-static void array_add(uint64_t value){
+/*static void array_add(uint64_t value){
 	int i =0;
 	while (g_ops_times[i][1] != 0){
 		if (g_ops_times[i][0] == value){
@@ -740,13 +736,13 @@ static void percentile_array(uint64_t array[][2]){
 		}	
 	}
 
-	/*i=0;
-	while (g_ops_times[i][1] != 0){
-		i++;
-		fprintf(g_output_file, "[%"PRIu64"]= %"PRIu64" ", g_ops_times[i][1], g_ops_times[i][0]);
-	}
+	// i=0;
+	// while (g_ops_times[i][1] != 0){
+	// 	i++;
+	// 	fprintf(g_output_file, "[%"PRIu64"]= %"PRIu64" ", g_ops_times[i][1], g_ops_times[i][0]);
+	// }
 
-	fprintf(g_output_file, "\n");*/
+	// fprintf(g_output_file, "\n");
 }
 
 //------------------------------------------------
@@ -775,7 +771,7 @@ static inline uint64_t safe_delta_ns(uint64_t start_ns, uint64_t stop_ns) {
 //
 static inline uint8_t* align_4096(uint8_t* stack_buffer) {
 	return (uint8_t*)(((uint64_t)stack_buffer + 4095) & ~4095ULL);
-}
+}*/
 
 //------------------------------------------------
 // Aligned memory allocation.
