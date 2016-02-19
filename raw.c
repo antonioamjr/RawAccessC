@@ -27,8 +27,9 @@
 //==========================================================
 // Constants
 //
-#define THREADS_MAX_NUM 300
-#define LATENCY_MAX_NUM 2000
+#define THREADS_MAX_NUM 200
+#define LATENCY_MAX_NUM 6000
+
 #define MAX_DEVICE_NAME_SIZE 64
 #define WHITE_SPACE " \t\n\r"
 
@@ -74,10 +75,12 @@ static uint64_t g_run_start_us;
 static pthread_mutex_t running_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static int g_fd_device = -1;
+static int g_ref_tab_columns = 1; //Division of SSD sector
 static char g_device_name[MAX_DEVICE_NAME_SIZE];
 static uint32_t g_scheduler_mode = 0; //noop mode
 static uint32_t g_record_bytes = 512; 
 static uint32_t g_large_block_ops_bytes = 131072; //128K
+static bool *g_ref_tab;
 
 static FILE* g_output_file;
 static device* g_device;
@@ -100,10 +103,14 @@ static bool	configure(int argc, char* argv[]);
 
 static int fd_get(device* p_device);
 static void	set_scheduler();
+static void print_ref_tab(); //------NOVO--------//
+static void erase_sector_ref(uint64_t sector, uint32_t div); //------NOVO--------//
+static void add_sector_ref(uint64_t sector, uint32_t div);
 static inline uint8_t* cf_valloc(size_t size);
+static uint64_t discover_min_op_bytes(int fd, const char *name);
+static bool is_sector_free(uint64_t sector, uint32_t div); //------NOVO--------//
 static bool config_is_arg_num(char *argv);
 static bool config_parse_device_name(char* device);
-static uint64_t discover_min_op_bytes(int fd, const char *name);
 static bool discover_num_blocks(device* p_device);
 static bool read_from_device(device* p_device, uint64_t offset,
 					uint32_t size, char* p_buffer);
@@ -125,7 +132,6 @@ int main(int argc, char* argv[]) {
 
 	set_scheduler();
 	srand(time(NULL));
-	memset(g_ops_times, 0, sizeof(g_ops_times));
 
 	g_running = true;
 
@@ -144,21 +150,22 @@ int main(int argc, char* argv[]) {
 	}
 
 	g_running = false;
-
 	printf("\n-> Test Finished!\n");
+	main_total_time = cf_getus() - main_start_time;
+
 	while (g_running_threads > 0){
 		sleep(1);
 		printf(" - Waiting Threads finish. Remaining Threads: %d          \r", g_running_threads);
 		fflush(stdout);
 	}
 
-	main_total_time = cf_getus() - main_start_time;
-
 	printf("\n-> Done!\n");
 	print_final_info(main_total_time);
+	print_ref_tab();
 	printf("\n=> Raw Device Access - direct IO test Ends\n");
 	
 	fclose(g_output_file);
+	free(g_ref_tab);
 	free(g_device);
 	return 0;
 }
@@ -193,10 +200,12 @@ char* readJNA(char* device_name, uint32_t size, uint64_t offset){
 	offset = (offset % g_device->num_read_offsets) * g_device->min_op_bytes;
 	//offset = random_read_offset(g_device);
 
-	if (! read_from_device(g_device, offset, g_device->read_bytes, p_buffer)){
-			printf("=> ERROR read op on offset: %" PRIu64 "\n", offset);
-			free(p_buffer);
-			exit(-1);
+	if(! is_sector_free(offset, 0)){
+		if (! read_from_device(g_device, offset, g_device->read_bytes, p_buffer)){
+				printf("=> ERROR read op on offset: %" PRIu64 "\n", offset);
+				free(p_buffer);
+				exit(-1);
+		}
 	}
 
 	message = p_buffer;
@@ -231,10 +240,12 @@ bool writeJNA(char* device_name, char* message, uint64_t offset){
 	offset = (offset % g_device->num_read_offsets) * g_device->min_op_bytes;
 	strcpy(p_buffer, message);
 
-	if (! write_to_device(g_device, offset, g_device->read_bytes, p_buffer)){
-			printf("=> ERROR write op on offset: %" PRIu64 "\n", offset);
-			free(p_buffer);
-			exit(-1);
+	if(is_sector_free(offset, 0)){
+		if (! write_to_device(g_device, offset, g_device->read_bytes, p_buffer)){
+				printf("=> ERROR write op on offset: %" PRIu64 "\n", offset);
+				free(p_buffer);
+				exit(-1);
+		}
 	}	
 	
 	free(p_buffer);
@@ -263,23 +274,23 @@ static bool thread_creation_op(int num_of_threads){
 		*thread_num = (int)g_running_threads;
 
 		//READ ONLY
-		pthread_create(&(threads[i]), NULL, read_op, thread_num);
-
-		pthread_mutex_lock(&running_mutex);
-		g_read_threads++;
-    	g_running_threads++;
-    	pthread_mutex_unlock(&running_mutex);
-
-    	//WRITE ONLY
-  //   	pthread_create(&(threads[i]), NULL, write_op, thread_num);
+		// pthread_create(&(threads[i]), NULL, read_op, thread_num);
 
 		// pthread_mutex_lock(&running_mutex);
-		// g_write_threads++;
+		// g_read_threads++;
   //   	g_running_threads++;
   //   	pthread_mutex_unlock(&running_mutex);
+
+    	//WRITE ONLY
+    	pthread_create(&(threads[i]), NULL, write_op, thread_num);
+
+		pthread_mutex_lock(&running_mutex);
+		g_write_threads++;
+    	g_running_threads++;
+    	pthread_mutex_unlock(&running_mutex);
 	}
 	
-	// //READ AND WRITE
+	// READ AND WRITE
 	// for (i=0; i < (num_of_threads*3)/4; i++){
 	// 	int *thread_num = malloc(sizeof(int *));
 	// 	*thread_num = (int)g_running_threads;
@@ -289,6 +300,7 @@ static bool thread_creation_op(int num_of_threads){
 	// 	g_read_threads++;
  //    	g_running_threads++;
  //    	pthread_mutex_unlock(&running_mutex);
+
 	// }
 	// for (i= (num_of_threads*3)/4; i < num_of_threads; i++){
 	// 	int *thread_num = malloc(sizeof(int *));
@@ -299,6 +311,7 @@ static bool thread_creation_op(int num_of_threads){
 	// 	g_write_threads++;
  //    	g_running_threads++;
  //    	pthread_mutex_unlock(&running_mutex);
+
 	// }
 
 	return true;
@@ -308,7 +321,6 @@ static bool thread_creation_op(int num_of_threads){
 // Thread Read Operation.
 //
 static void *read_op(void *thread_num){
-	//printf("\n-> Reading thread %d running!\n", *((int *) thread_num));
 	int counter = 0;	
 	uint64_t begin_op_time, offset;
 	char* p_buffer = cf_valloc(g_device->read_bytes);
@@ -320,12 +332,12 @@ static void *read_op(void *thread_num){
 
 	while (g_running){
 		offset = random_read_offset(g_device);
-		begin_op_time = cf_getms();
+		begin_op_time = cf_getus();
 		if (! read_from_device(g_device, offset, g_device->read_bytes, p_buffer)){
 			printf("=> ERROR read op number: %d; Offset: %" PRIu64 "\n", counter+1, offset);
 		}
 		else{
-			array_add(safe_delta_ns(begin_op_time, cf_getms()));
+			array_add(safe_delta_ns(begin_op_time, cf_getus())/10);
 			counter++;
 		}
 	}
@@ -344,7 +356,6 @@ static void *read_op(void *thread_num){
 // Thread Write Operation.
 //
 static void *write_op(void *thread_num){
-	//printf("\n-> Writing thread %d running!\n", *((int *) thread_num));
 	int counter = 0;
 	uint64_t begin_op_time, offset;
 	char* message = "Hello SSD. Regards from WRITING thread!";
@@ -359,12 +370,12 @@ static void *write_op(void *thread_num){
 
 	while (g_running){
 		offset = random_read_offset(g_device);
-		begin_op_time = cf_getms();
+		begin_op_time = cf_getus();
 		if (! write_to_device(g_device, offset, g_device->read_bytes, p_buffer)){
 			printf("=> ERROR write op number: %d; Offset: %" PRIu64 "\n", counter+1, offset);
 		}
 		else{
-			array_add(safe_delta_ns(begin_op_time, cf_getms()));
+			array_add(safe_delta_ns(begin_op_time, cf_getus())/10);
 			counter++;
 		}
 	}
@@ -478,8 +489,7 @@ static bool config_out_file(char *fileName){
 //
 static bool	configure(int argc, char* argv[]){
 	if (argc != 6){
-		printf("=> ERROR: Wrong number of arguments!\nUsage: ./raw device buffer(size) 
-			threads(num) time(seconds) resultfile\n");
+		printf("=> ERROR: Wrong number of arguments!\nUsage: ./raw device buffer(size) threads(num) time(seconds) resultfile\n");
 		return false;
 	}
 
@@ -495,7 +505,7 @@ static bool	configure(int argc, char* argv[]){
 	else{
 		g_run_us = (uint64_t) atoi(argv[4]) * 1000000;
 		g_number_of_threads = (uint32_t) atoi(argv[3]);
-		g_record_bytes = (uint32_t) atoi(argv[2])
+		g_record_bytes = (uint32_t) atoi(argv[2]);
 	}
 
 	if (! config_parse_device_name(argv[1])){
@@ -503,14 +513,13 @@ static bool	configure(int argc, char* argv[]){
 		return false;
 	}
 
-	fprintf(g_output_file,"-> Configuration was a success!\n");
-	fprintf(g_output_file,"-> Device name: %s\n", g_device->name);
-
 	if (! discover_num_blocks(g_device)){
 		printf("=> ERROR: Couldn't discover number of blocks.\n");
 		return false;
 	}
 
+	fprintf(g_output_file,"-> Configuration was a success!\n");
+	fprintf(g_output_file,"-> Device name: %s\n", g_device->name);
 	return true;
 }
 
@@ -560,15 +569,14 @@ static bool write_to_device(device* p_device, uint64_t offset, uint32_t size, ch
 		return false;
 	}
 
-	//pthread_mutex_lock(&running_mutex);
 	if (lseek(fd, offset, SEEK_SET) != offset ||
 			write(fd, p_buffer, size) != (ssize_t)size) {
 		close(fd);
 		printf("=> ERROR: Couldn't seek & write\n");
 		return false;
 	}
-	//pthread_mutex_unlock(&running_mutex);
 
+	add_sector_ref(offset, 0);
 	uint64_t stop_ns = cf_getns();
 	return true;
 }
@@ -644,6 +652,10 @@ static bool discover_num_blocks(device* p_device) {
 		fprintf(g_output_file, "__________________________________________\n");
 	}
 
+	g_ref_tab = malloc(sizeof(bool)* g_device->num_read_offsets * g_ref_tab_columns);
+	memset(g_ref_tab, 0, sizeof(g_ref_tab));
+	memset(g_ops_times, 0, sizeof(g_ops_times));
+
 	return true;
 }
 
@@ -678,6 +690,55 @@ static uint64_t discover_min_op_bytes(int fd, const char *name) {
 }
 
 //------------------------------------------------
+// Check if sector is free
+//
+static bool is_sector_free(uint64_t sector, uint32_t division){
+	sector = sector/g_device->read_bytes;
+	if (division < g_ref_tab_columns){
+		if (*(g_ref_tab+(sector + division)) == 0){
+			return true;
+		}else
+		{return false;}
+	}	
+}
+
+//------------------------------------------------
+// Set sector on reference table
+//
+static void add_sector_ref(uint64_t sector, uint32_t division){
+	sector = sector/g_device->read_bytes;
+	if (division < g_ref_tab_columns)
+	{*(g_ref_tab + (sector + division)) = 1;}
+}
+
+//------------------------------------------------
+// Clear sector on reference table
+//
+static void erase_sector_ref(uint64_t sector, uint32_t division){
+	if (division < g_ref_tab_columns)
+	{*(g_ref_tab + sector + division) = 0;}
+}
+
+//------------------------------------------------
+// Print reference table
+//
+static void print_ref_tab(){
+	int i=0;
+	FILE* out = fopen("ref_tab.txt", "w");
+
+	if (! out) {
+		return;
+	}
+
+	for (i=0; i< g_device->num_read_offsets/10000; i=i+6)
+	{
+		fprintf(out,"[%.*d]=%d [%.*d]=%d [%.*d]=%d [%.*d]=%d [%.*d]=%d [%.*d]=%d \n",
+		 9, i, *(g_ref_tab+i),9, i+1, *(g_ref_tab+i+1),9, i+2, *(g_ref_tab+i+2),9, i+3, *(g_ref_tab+i+3),
+		 9, i+4, *(g_ref_tab+i+4),9, i+5, *(g_ref_tab+i+5),9, i+6, *(g_ref_tab+i+6));
+	}
+}
+
+//------------------------------------------------
 // Add to a array
 //
 static void array_add(uint64_t value){
@@ -690,9 +751,15 @@ static void array_add(uint64_t value){
 			return;
 		}
 		i++;
+		if (i>=LATENCY_MAX_NUM){
+			printf("Array g_ops_times passed across max num.\n");
+			exit(-1);
+		}
 	}
+	pthread_mutex_lock(&running_mutex);
 	g_ops_times[i][0] = value; 
 	g_ops_times[i][1] = 1;
+	pthread_mutex_unlock(&running_mutex);
 }
 //------------------------------------------------
 // Bubble sort array
@@ -723,23 +790,23 @@ static void percentile_array(uint64_t array[][2]){
 
 	for (i=0; i < LATENCY_MAX_NUM; i++){
 		counter += g_ops_times[i][1];
-		if (counter >= perc50){
-			fprintf(g_output_file, "50th percentile: %"PRIu64" ms\n", g_ops_times[i][0]);
+		if (counter >= perc50 || g_ops_times[i+1][1] == 0){
+			fprintf(g_output_file, "50th percentile: %.2f ms\n", ((float)g_ops_times[i][0])/100);
 			perc50 = perc90*2;
 		}
 		if (counter >= perc90 || g_ops_times[i+1][1] == 0){
-			fprintf(g_output_file, "90th percentile: %"PRIu64" ms\n", g_ops_times[i][0]);
+			fprintf(g_output_file, "90th percentile: %.2f ms\n", ((float)g_ops_times[i][0])/100);
+			
+			// i=0;
+			// while (g_ops_times[i][1] != 0){
+			// 	fprintf(g_output_file, "[%"PRIu64"]= %"PRIu64" ", g_ops_times[i][1], g_ops_times[i][0]);
+			// 	i++;
+			// }
+			// fprintf(g_output_file, "\n");
+
 			return;
 		}	
-	}
-
-	// i=0;
-	// while (g_ops_times[i][1] != 0){
-	// 	i++;
-	// 	fprintf(g_output_file, "[%"PRIu64"]= %"PRIu64" ", g_ops_times[i][1], g_ops_times[i][0]);
-	// }
-
-	// fprintf(g_output_file, "\n");
+	}	
 }
 
 //------------------------------------------------
