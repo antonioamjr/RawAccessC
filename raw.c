@@ -80,7 +80,8 @@ static char g_device_name[MAX_DEVICE_NAME_SIZE];
 static uint32_t g_scheduler_mode = 0; //noop mode
 static uint32_t g_record_bytes = 512; 
 static uint32_t g_large_block_ops_bytes = 131072; //128K
-static bool *g_ref_tab = NULL;
+//static bool *g_ref_tab = NULL;
+static uint64_t *g_ref_tab = NULL;
 
 static FILE* g_output_file;
 static device* g_device;
@@ -102,7 +103,7 @@ static bool thread_creation_op(int num_of_threads);
 static bool config_is_arg_alpha(char *argv);
 static bool configure_stress_test(int argc, char* argv[]);
 
-static char* mystrncpy(char *s1, const char *s2, size_t n, char c);
+static char* myStrncpy(char *s1, const char *s2, size_t n, char c);
 static int fd_get(device* p_device);
 static inline uint8_t* cf_valloc(size_t size);
 static void	set_scheduler();
@@ -130,15 +131,32 @@ bool writeJNA(char* device_name, char* message, uint64_t offset, uint32_t divisi
 //
 int main(int argc, char* argv[]) {
 	//stressTest(argc, argv);
-	//586072319
 
 	char *result;
 	char *inital = "Some Initial String. Some Initial String. Some Initial String. Some Initial String. Some Initial String. Some Initial String. Some Initial String. Some Initial String. Some Initial String. Some Initial String. Some Initial String. Some Initial String. Some";
 
 	writeJNA(argv[1], inital, atol(argv[3]), 0);
+	printf("Sector referece = %d\n", show_sector_ref(atol(argv[3]), 0));
 	writeJNA(argv[1], argv[4], atol(argv[3]), 1);
-	result = readJNA(argv[1], atoi(argv[2]), atol(argv[3]), 1);
-	result = readJNA(argv[1], atoi(argv[2]), atol(argv[3]), 0);
+	printf("Sector referece = %d\n", show_sector_ref(atol(argv[3]), 1));
+	writeJNA(argv[1], inital, atol(argv[3]), 2);
+	printf("Sector referece = %d\n", show_sector_ref(atol(argv[3]), 2));
+	writeJNA(argv[1], argv[4], atol(argv[3]), 3);
+	printf("Sector referece = %d\n", show_sector_ref(atol(argv[3]), 3));
+
+	result = readJNA(argv[1], atoi(argv[2]), atol(argv[3]), 3);
+	//printf("Sector referece = %d\n", show_sector_ref(atol(argv[3]), 3));
+	result = readJNA(argv[1], atoi(argv[2]), atol(argv[3]), 2);
+	//printf("Sector referece = %d\n", show_sector_ref(atol(argv[3]), 2));
+
+	printf("Long = 0x%"PRIx64"\n", *(g_ref_tab + ((atol(argv[3])*g_ref_tab_columns) / (sizeof(uint64_t)*8))));
+
+	erase_sector_ref(atol(argv[3]), 2);
+	printf("Sector referece = %d\n", show_sector_ref(atol(argv[3]), 2));
+	erase_sector_ref(atol(argv[3]), 3);
+	printf("Sector referece = %d\n", show_sector_ref(atol(argv[3]), 3));
+
+	printf("Long = 0x%"PRIx64"\n", *(g_ref_tab + ((atol(argv[3])*g_ref_tab_columns) / (sizeof(uint64_t)*8))));
 
 	free(g_ref_tab);
 	return 0;
@@ -189,7 +207,7 @@ static void stressTest(int argc, char* argv[]){
 
 	printf("\n-> Done!\n");
 	print_final_info(main_total_time);
-	print_ref_tab();
+	//print_ref_tab();
 	printf("\n=> Raw Device Access - direct IO Stress test Ends\n");
 	
 	fclose(g_output_file);
@@ -236,7 +254,7 @@ char* readJNA(char* device_name, uint32_t size, uint64_t offset, uint32_t divisi
 				exit(-1);
 		}else{
 			strncpy(message, p_buffer+(sector_div*division), sector_div);
-			//mystrncpy(message, p_buffer+(sector_div*division), sector_div, '0');
+			//myStrncpy(message, p_buffer+(sector_div*division), sector_div, '0');
 			printf("Message = %s\n", message);
 		}
 	}else{
@@ -293,7 +311,7 @@ bool writeJNA(char* device_name, char* message, uint64_t offset, uint32_t divisi
 	return true;
 }
 
-static char* mystrncpy(char *s1, const char *s2, size_t n, char c){
+static char* myStrncpy(char *s1, const char *s2, size_t n, char c){
 
 	char *s = s1;
 	while (n > 0 && *s2 != '\0') {
@@ -732,9 +750,10 @@ static bool discover_num_blocks(device* p_device) {
 
 	if (!g_ref_tab)
 	{
-		g_ref_tab = malloc(sizeof(bool)* g_device->num_read_offsets * g_ref_tab_columns);
+		//g_ref_tab = malloc(sizeof(bool) * g_device->num_read_offsets * g_ref_tab_columns);
+		g_ref_tab = malloc((g_device->num_read_offsets * g_ref_tab_columns) / 8);
 		memset(g_ref_tab, 0, sizeof(g_ref_tab));
-		printf("Table of Reference created!\n");
+		printf("Table of Reference created(%"PRIu64")!\n", (g_device->num_read_offsets * g_ref_tab_columns) / 64);
 	}
 
 	return true;
@@ -790,7 +809,11 @@ static void prep_to_sector_div(uint64_t offset, uint32_t division, void* dest, c
 }
 
 static bool show_sector_ref(uint64_t sector, uint32_t division){
-	return *(g_ref_tab + (sector * g_ref_tab_columns + division));
+	//return *(g_ref_tab + (sector * g_ref_tab_columns + division));
+
+	uint64_t ref_tab_long = *(g_ref_tab + ((sector*g_ref_tab_columns+division) / (sizeof(uint64_t)*8)));
+	uint32_t long_bit = (sector * g_ref_tab_columns + division) % (sizeof(uint64_t)*8);
+	return (ref_tab_long & ((uint64_t)0b1 << long_bit));
 }
 
 //------------------------------------------------
@@ -798,7 +821,10 @@ static bool show_sector_ref(uint64_t sector, uint32_t division){
 //
 static bool is_sector_free(uint64_t sector, uint32_t division){
 	if (division < g_ref_tab_columns && division >= 0){
-		if (*(g_ref_tab + (sector * g_ref_tab_columns + division)) == 0){
+		uint64_t ref_tab_long = *(g_ref_tab + ((sector*g_ref_tab_columns+division) / (sizeof(uint64_t)*8)));
+		uint32_t long_bit = (sector * g_ref_tab_columns + division) % (sizeof(uint64_t)*8);
+		if (!(ref_tab_long & ((uint64_t)0b1 << long_bit))){
+		//if (*(g_ref_tab + (sector * g_ref_tab_columns + division)) == 0){
 			return true;
 		}
 	}
@@ -810,7 +836,11 @@ static bool is_sector_free(uint64_t sector, uint32_t division){
 //
 static void add_sector_ref(uint64_t sector, uint32_t division){
 	if (division < g_ref_tab_columns && division >= 0){
-		*(g_ref_tab + (sector * g_ref_tab_columns + division)) = 1;
+		// *(g_ref_tab + (sector * g_ref_tab_columns + division)) = 1;
+
+		uint32_t long_bit = (sector * g_ref_tab_columns + division) % (sizeof(uint64_t)*8);
+		printf("%"PRIu32"\n", long_bit);
+		*(g_ref_tab + ((sector*g_ref_tab_columns+division) / (sizeof(uint64_t)*8))) |= ((uint64_t)0b1 << long_bit);
 	}
 }
 
@@ -819,7 +849,9 @@ static void add_sector_ref(uint64_t sector, uint32_t division){
 //
 static void erase_sector_ref(uint64_t sector, uint32_t division){
 	if (division < g_ref_tab_columns && division >= 0){
-		*(g_ref_tab + (sector * g_ref_tab_columns + division)) = 0;
+		//*(g_ref_tab + (sector * g_ref_tab_columns + division)) = 0;
+		uint32_t long_bit = (sector * g_ref_tab_columns + division) % (sizeof(uint64_t)*8);
+		*(g_ref_tab + ((sector*g_ref_tab_columns) / (sizeof(uint64_t)*8))) &= ~((uint64_t)0b1 << long_bit);
 	}
 }
 
@@ -827,24 +859,21 @@ static void erase_sector_ref(uint64_t sector, uint32_t division){
 // Print reference table
 //
 static void print_ref_tab(){
-	int i=0, j=0;
+	int i=0;
 	FILE* out = fopen("ref_tab.txt", "w");
 
 	if (! out) {
 		return;
 	}
 
-	for (i=0; i< (g_device->num_read_offsets); i++)
+	for (i=0; i< (g_device->num_read_offsets * g_ref_tab_columns) / (sizeof(uint64_t) * 8); i++)
 	{
-		for (j=0; j<g_ref_tab_columns; j++){
-			if (!is_sector_free(i,j))
-			{fprintf(out,"[%.*d->%1d]=%1d\n", 9, i, j, *(g_ref_tab+(i*g_ref_tab_columns+j)));}
-		}
+		fprintf(out,"[%.*d]= %"PRIu64" \n", 10, i, *(g_ref_tab +i));
 	}
 }
 
 //------------------------------------------------
-// Add to a array
+// Add to a array for percentile statistics
 //
 static void array_add(uint64_t value){
 	int i =0;
@@ -867,7 +896,7 @@ static void array_add(uint64_t value){
 	pthread_mutex_unlock(&running_mutex);
 }
 //------------------------------------------------
-// Bubble sort array
+// Sort array and percentile show
 //
 static void percentile_array(uint64_t array[][2]){
 	int i=0, j=0, max;
